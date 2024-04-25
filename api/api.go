@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/ollama"
 	"github.com/tmc/langchaingo/prompts"
+	"log"
 	"net/http"
 )
 
@@ -78,4 +81,43 @@ func GenerateResponse(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"response": res})
+}
+
+func StreamResponse(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+
+	llm, err := ollama.New(ollama.WithModel("qwen:72b"), ollama.WithServerURL("http://10.101.5.11:11434"))
+	if err != nil {
+		log.Println("Failed to load model")
+		fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", "Failed to load model")
+		c.Writer.Flush()
+	}
+
+	content, err := llm.GenerateContent(context.Background(),
+		[]llms.MessageContent{
+			llms.TextParts(llms.ChatMessageTypeHuman, "夜晚的水母为什么不会游泳"),
+		},
+		// 流式响应可以让用户更快地获取到回答的部分内容
+		llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+			for _, line := range bytes.Split(chunk, []byte("\n")) {
+				if len(line) > 0 {
+					fmt.Fprintf(c.Writer, "data: %s\n\n", string(line))
+					fmt.Println(string(line))
+					c.Writer.Flush()
+				}
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		// 发送错误事件到客户端
+		fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", "Failed to call llm")
+		c.Writer.Flush()
+	}
+	if content.Choices[0].FuncCall != nil {
+		fmt.Fprintf(c.Writer, "data: Function call :%v\n\n", content.Choices[0].FuncCall)
+		c.Writer.Flush()
+	}
 }
